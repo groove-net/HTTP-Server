@@ -1,5 +1,3 @@
 # HTTP Server
 
-A simple C application demonstrating project structure with
-src, include, Makefile-based build system, and modular design.
-Uses static libraries and includes dependency management.
+An event-driven HTTP Server written in pure C.
