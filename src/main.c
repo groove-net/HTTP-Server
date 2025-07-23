@@ -8,11 +8,11 @@
  ============================================================================
 */
 
-#include <stdio.h>
-#include <stdlib.h>
+#include "../include/server.h"
 
-int main()
+#define PORT "3094"   // Port number
+
+int main(void)
 {
-	puts("Running HTTP Server...");
-  return EXIT_SUCCESS;
+  server_init(PORT);
 }
