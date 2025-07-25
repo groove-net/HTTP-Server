@@ -1,4 +1,3 @@
-
 #include <arpa/inet.h>
 #include <errno.h>
 #include <netdb.h>
@@ -14,6 +13,13 @@
 #include <fcntl.h>
 #include "../../include/server.h"
 
+// make fd non-blokcing
+int make_socket_nonblocking(int fd)
+{
+  int flags = fcntl(fd, F_GETFL, 0);
+  return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
+
 // get sockaddr, IPv4 or IPv6:
 void *get_in_addr(struct sockaddr *sa)
 {
@@ -24,7 +30,7 @@ void *get_in_addr(struct sockaddr *sa)
     return &(((struct sockaddr_in6*)sa)->sin6_addr);
 }
 
-// return listening socket
+// create and return a listening socket
 int create_listener_socket(const char *port, int backlog)
 {
   struct addrinfo hints, *servinfo;
@@ -86,97 +92,110 @@ int create_listener_socket(const char *port, int backlog)
   }
 
   // Make non blocking
-  int flags = fcntl(sockfd, F_GETFL, 0);
-  fcntl(sockfd, F_SETFL, flags | O_NONBLOCK);
+  make_socket_nonblocking(sockfd);
 
   return sockfd;
 }
 
 void server_init(const char *port)
 {
-  int sockfd = create_listener_socket(port, BACKLOG); // create listening socket descriptor
-  printf("[*] Server listening on port %s\n", port);
-  struct sockaddr_storage remote_addr; // client address information
-  int new_fd; // new connection
-  socklen_t sin_size;
-  char buf[16]; // buffer for client data
-  char remote_ip[INET6_ADDRSTRLEN];
+  // Declare structures for client data
+  struct sockaddr_storage remote_addr;     // client address information
+  socklen_t sin_size = sizeof remote_addr; // size of client address information
+  char remote_ip[INET6_ADDRSTRLEN];        // client ip information
+  char buf[16];                            // buffer for client data
 
-  // create epoll instance
+  // Create epoll instance
+  struct epoll_event events[MAX_EVENTS];
   int epfd = epoll_create1(0);
   if (epfd == -1) {
     perror("epoll_create1");
-    exit(1);
+    exit(EXIT_FAILURE);
   }
 
-  struct epoll_event ev, events[MAX_EVENTS];
-  ev.events = EPOLLIN;
+  // Create listener socket descriptor
+  int sockfd = create_listener_socket(port, BACKLOG); 
+  
+  // Register the listener socket on epoll
+  struct epoll_event ev;
   ev.data.fd = sockfd;
-
+  ev.events = EPOLLIN; // We only care about if the listener is readable (EPOLLIN)
   if (epoll_ctl(epfd, EPOLL_CTL_ADD, sockfd, &ev) == -1) {
     perror("epoll_ctl: listener");
-    exit(1);
+    exit(EXIT_FAILURE);
   }
 
-  // accept() loop
+  // Main Event loop
+  printf("[*] Server listening on port %s\n", port);
   while(1)
   {
-    int poll_count = epoll_wait(epfd, events, MAX_EVENTS, -1);
-
-    if (poll_count == -1) {
+    // Pause thread until an event occurs on a socket
+    int nfds = epoll_wait(epfd, events, MAX_EVENTS, -1);
+    if (nfds == -1) 
+    {
       perror("epoll_wait");
-      exit(1);
+      exit(EXIT_FAILURE);
     }
 
-    // Run through the existing connections looking for data to read
-    for(int i = 0; i < poll_count; i++) {
-      int fd = events[i].data.fd;
+    // Once event occurs on one or more sockets, loop through the returned fds
+    for(int i = 0; i < nfds; i++) 
+    {
+      int fd = events[i].data.fd; // get fd
+      uint32_t event = events[i].events; // get event
 
-      // Check if someone's ready to read
-      if (fd == sockfd) {
-        // If listener is ready to read, handle new connection
-
-        sin_size = sizeof remote_addr;
-        new_fd = accept(sockfd, (struct sockaddr *)&remote_addr, &sin_size);
-
-        if (new_fd == -1) {
-          perror("accept");
-          continue;
-        }
-
-        inet_ntop(remote_addr.ss_family, get_in_addr((struct sockaddr*)&remote_addr), remote_ip, INET6_ADDRSTRLEN);
-
-        int flags = fcntl(new_fd, F_GETFL, 0);
-        fcntl(new_fd, F_SETFL, flags | O_NONBLOCK);
-
-        ev.events = EPOLLIN | EPOLLRDHUP;
-        ev.data.fd = new_fd;
-
-        if (epoll_ctl(epfd, EPOLL_CTL_ADD, new_fd, &ev) == -1) {
-            perror("epoll_ctl: new connection");
-            close(new_fd);
+      // fd is the listener
+      if (fd == sockfd) 
+      {
+        // fd is readable
+        if (event & EPOLLIN)
+        {
+          // The listener is ready to read, this means we need to handle a new connection
+          int new_fd = accept(sockfd, (struct sockaddr *)&remote_addr, &sin_size); // accept new connection
+          if (new_fd == -1) 
+          {
+            perror("accept");
             continue;
+          }
+
+          inet_ntop(remote_addr.ss_family, get_in_addr((struct sockaddr*)&remote_addr), remote_ip, INET6_ADDRSTRLEN);
+
+          make_socket_nonblocking(new_fd);
+
+          // Register new socket on epoll
+          ev.data.fd = new_fd;
+          ev.events = EPOLLIN | EPOLLOUT | EPOLLRDHUP;  // We want to check for read(EPOLLIN), 
+                                                        // write(EPOLLOUT) and 
+                                                        // hang up/peer closed connection (EPOLLRDHUP)
+          if (epoll_ctl(epfd, EPOLL_CTL_ADD, new_fd, &ev) == -1) 
+          {
+              perror("epoll_ctl: new connection");
+              close(new_fd);
+              continue;
+          }
+
+          // All done! Now you may do some work in post
+          printf("[+] New client connection (%s:%d) on socket %d\n", 
+                 remote_ip, 
+                 ntohs(((struct sockaddr_in*)&remote_addr)->sin_port), 
+                 new_fd);
         }
-
-        printf("[+] New client connection (%s:%d) on socket %d\n", 
-               remote_ip, 
-               ntohs(((struct sockaddr_in*)&remote_addr)->sin_port), 
-               new_fd);
-      } else {
-        // If not the listener, we're just a regular client
-        int nbytes = recv(fd, buf, sizeof buf, 0);
-
-        if (getpeername(fd, (struct sockaddr *)&remote_addr, &sin_size) == -1) {
+      } 
+      // fd is not the listener, just a regular client
+      else
+      {
+        // Whether we are reading/writing/disconnecting we want to retrieve client information
+        // We may need it (e.g. for logging)
+        if (getpeername(fd, (struct sockaddr *)&remote_addr, &sin_size) == -1) 
+        {
           perror("getpeername");
           continue;
         }
 
         inet_ntop(remote_addr.ss_family, get_in_addr((struct sockaddr*)&remote_addr), remote_ip, INET6_ADDRSTRLEN);
 
-        if (nbytes <= 0) {
-          // Got error
-          if (nbytes < 0) perror("recv");
-
+        // fd is disconnecting
+        if (event & EPOLLRDHUP)
+        {
           // Connection closed by client
           printf("[-] Client disconnected (%s:%d) from socket %d\n", 
                remote_ip, 
@@ -185,12 +204,25 @@ void server_init(const char *port)
 
           close(fd); // Bye!
           epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
-        } else {
+          continue;
+        }
+
+        // fd is readable
+        if (event & EPOLLIN)
+        {
+          int nbytes = recv(fd, buf, sizeof buf, 0);
+          if (nbytes < 0) perror("recv");
           // We got some good data from a client
           printf("[*] Received %d bytes from socket %d: %.*s", nbytes, fd, nbytes, buf);
           if (buf[nbytes-1] != '\n') printf("\n");
         }
-      } // END handle data from client
-    } // END looping through file descriptors
+
+        // fd is writable
+        if (event & EPOLLOUT)
+        {
+          continue;
+        }
+      } 
+    } 
   }
 }
