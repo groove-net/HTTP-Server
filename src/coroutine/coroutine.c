@@ -1,7 +1,6 @@
 #include "../../include/coroutine.h"
 #include <assert.h>
 #include <stddef.h>
-#include <stdio.h>
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -102,50 +101,4 @@ void coroutine_destroy(Worker* worker, Coroutine* co)
 
   // free coroutine
   free(co);
-}
-
-/*
- * Attempts to read. If no data is available, it waits until the fd is readable */
-ssize_t recv_async(int socket, void *buffer, size_t length, int flags, Worker* worker)
-{
-  int nbytes = recv(socket, buffer, length, flags);
-
-  if (nbytes == -1) coroutine_yield(worker, socket, WAIT_READ);
-  else return nbytes;
-
-  return recv(socket, buffer, length, flags);
-}
-
-/*
- * Attempts to write. If no space is available, it waits until the fd is writeable */
-ssize_t send_async(int socket, const void *buffer, size_t length, int flags, Worker* worker)
-{
-  int nbytes = send(socket, buffer, length, flags);
-
-  if (nbytes == -1) coroutine_yield(worker, socket, WAIT_WRITE);
-  else return nbytes;
-
-  return send(socket, buffer, length, flags);
-}
-
-/*
- * This is an exmaple of a coroutine task. Here we can should use our non-blocking functions
- * for read/revc, write/send, sleep, etc. */
-void echo_coroutine(void* arg, Worker* worker)
-{
-  int fd = *(int*)arg;
-  free(arg);
-
-  char buf[8];
-  while (1)
-  {
-    int nbytes = recv_async(fd, buf, sizeof(buf), 0, worker);
-    if (nbytes < 0) perror("recv");
-
-    // We got some good data from a client
-    printf("[*] Received %d bytes from socket %d: %.*s", nbytes, fd, nbytes, buf);
-    if (buf[nbytes-1] != '\n') printf("\n");
-
-    send_async(fd, buf, nbytes, 0, worker);
-  }
 }

@@ -1,5 +1,4 @@
 #include <arpa/inet.h>
-#include <errno.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <stdio.h>
@@ -13,7 +12,8 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include "../../include/server.h"
-#include "../../include/coroutine.h"
+#include "../../include/request-handler.h"
+#include "../../include/connection.h"
 
 #define NUM_WORKERS 4
 static Worker workers[NUM_WORKERS];
@@ -105,23 +105,11 @@ int create_listener_socket(const char *port, int backlog)
 
 void* worker_loop(void* arg)
 {
-  Worker* w = (Worker *) arg;
-  
-  // Declare structures for client data
-  struct sockaddr_storage remote_addr;     // client address information
-  socklen_t sin_size = sizeof remote_addr; // size of client address information
-  char remote_ip[INET6_ADDRSTRLEN];        // client ip information
-
-  // Create epoll instance
   struct epoll_event events[MAX_EVENTS];
-  // int epfd = epoll_create1(0);
-  // if (epfd == -1) {
-  //   perror("epoll_create1");
-  //   exit(EXIT_FAILURE);
-  // }
+  Worker* w = (Worker *) arg;
 
   // Main Event loop
-  printf("Initialzing Thread %d\n", w->id);
+  // printf("Initialzing Thread %d\n", w->id);
   while(1)
   {
     // Pause thread until an event occurs on a socket
@@ -153,40 +141,20 @@ void* worker_loop(void* arg)
 
         int* pfd = malloc(sizeof(int));
         *pfd = client_fd;
-        Coroutine* co = coroutine_create(echo_coroutine, pfd, w);
+        Coroutine* co = coroutine_create(entry, pfd, w);
         add_to_ready(w, co);
 
         continue;
       }
 
-      // Whether we are reading/writing/disconnecting we want to retrieve client information
-      // We may need it (e.g. for logging)
-      if (getpeername(fd, (struct sockaddr *)&remote_addr, &sin_size) == -1) 
-      {
-        perror("getpeername");
-        continue;
-      }
-      inet_ntop(remote_addr.ss_family, get_in_addr((struct sockaddr*)&remote_addr), remote_ip, INET6_ADDRSTRLEN);
-
-      // fd is disconnecting
+      // fd is disconnecting, connection closed by client
       if (event & EPOLLRDHUP)
       {
-        // Connection closed by client
-        printf("[-] Client disconnected (%s:%d) from socket %d\n", 
-             remote_ip, 
-             ntohs(((struct sockaddr_in*)&remote_addr)->sin_port), 
-             fd);
-
-        close(fd); // Bye!
-
-        Coroutine* co = w->fd_table[fd];  // get coroutine
-        w->fd_table[fd] = NULL;           // remove coroutine from waiting table
-        if (co) coroutine_destroy(w, co); // destroy coroutine
-
-        epoll_ctl(w->epfd, EPOLL_CTL_DEL, fd, NULL);
+        close_connection(fd, w);
         continue;
       }
 
+      // fd is either readble or writable
       if (w->fd_table[fd])
       {
         Coroutine* co = w->fd_table[fd];
@@ -268,25 +236,44 @@ void server_init(const char *port)
 
     make_socket_nonblocking(new_fd);
 
-    printf("[+] New client connection (%s:%d) on socket %d\n", 
-           remote_ip, 
-           ntohs(((struct sockaddr_in*)&remote_addr)->sin_port), 
-           new_fd);
-
     // Sends a message to a target worker thread via a pipe containing the new clients socket
     // The worker thread registers the socket and polls for writes/reads
     int target = current_worker++ % NUM_WORKERS; // Hashing function
-    printf("Targetting thread %d\n", target);
+    printf("[+] New client connection (%s:%d) on socket %d, thread %d\n", 
+           remote_ip, 
+           ntohs(((struct sockaddr_in*)&remote_addr)->sin_port), 
+           new_fd,
+           target);
     write(workers[target].notify_fds[1], &new_fd, sizeof(int));
   }
-  
-  // Register the listener socket on epoll
-  // struct epoll_event ev;
-  // ev.data.fd = sockfd;
-  // ev.events = EPOLLIN; // We only care about if the listener is readable (EPOLLIN)
-  // if (epoll_ctl(epfd, EPOLL_CTL_ADD, sockfd, &ev) == -1) {
-  //   perror("epoll_ctl: listener");
-  //   exit(EXIT_FAILURE);
-  // }
+}
 
+void close_connection(int fd, Worker* w)
+{
+  // Declare structures for client data
+  struct sockaddr_storage remote_addr;     // client address information
+  socklen_t sin_size = sizeof remote_addr; // size of client address information
+  char remote_ip[INET6_ADDRSTRLEN];        // client ip information
+
+  // Retrieve client info for logging
+  if (getpeername(fd, (struct sockaddr *)&remote_addr, &sin_size) == -1) 
+  {
+    perror("getpeername");
+    return;
+  }
+  inet_ntop(remote_addr.ss_family, get_in_addr((struct sockaddr*)&remote_addr), remote_ip, INET6_ADDRSTRLEN);
+
+  close(fd); // Bye!
+
+  Coroutine* co = w->fd_table[fd];  // get coroutine
+  w->fd_table[fd] = NULL;           // remove coroutine from waiting table
+  if (co) coroutine_destroy(w, co); // destroy coroutine
+
+  epoll_ctl(w->epfd, EPOLL_CTL_DEL, fd, NULL);
+
+  // Log
+  printf("[-] Client disconnected (%s:%d) from socket %d\n", 
+       remote_ip, 
+       ntohs(((struct sockaddr_in*)&remote_addr)->sin_port), 
+       fd);
 }

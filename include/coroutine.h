@@ -28,7 +28,7 @@ typedef struct Worker {
 } Worker;
 
 void schedule(Worker*);
+void coroutine_yield(Worker*, int, WaitType);
 void add_to_ready(Worker*, Coroutine*);
 Coroutine* coroutine_create(void (*fn)(void*, Worker*), void*, Worker*);
 void coroutine_destroy(Worker*, Coroutine*);
-void echo_coroutine(void*, Worker*);
