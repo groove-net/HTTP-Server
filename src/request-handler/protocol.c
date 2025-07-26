@@ -32,6 +32,7 @@ void request_grow()
   req->buf = realloc(req->buf, req->buf_size);
 }
 
+/* State machine based parsing because we may recieve data partially */
 int parse(int fd, const char* buf, int nbytes, Worker* worker)
 {
   if (req == NULL) request_create();
@@ -69,6 +70,5 @@ int parse(int fd, const char* buf, int nbytes, Worker* worker)
         break; 
     }
   }
-
   return 1;
 }
