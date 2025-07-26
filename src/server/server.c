@@ -136,17 +136,12 @@ void* worker_loop(void* arg)
     for(int i = 0; i < nfds; i++) 
     {
       int fd = events[i].data.fd; // get fd
-      printf("fd is %d\n", fd);
       uint32_t event = events[i].events; // get event
 
       // Notification pipe readable: new fd(s) handed over by main thread
       if (fd == w->notify_fds[0]) {
         int client_fd;
-        ssize_t n = read(fd, &client_fd, sizeof(int));
-        printf("%d fd registering\n", client_fd);
-        if (n != sizeof(int)) {
-            fprintf(stderr, "Partial read from pipe (%ld bytes)\n", n);
-        }
+        read(fd, &client_fd, sizeof(int));
 
         struct epoll_event ev = {
           .data.fd = client_fd,
@@ -164,7 +159,6 @@ void* worker_loop(void* arg)
         continue;
       }
 
-          puts("This prints");
       // Whether we are reading/writing/disconnecting we want to retrieve client information
       // We may need it (e.g. for logging)
       if (getpeername(fd, (struct sockaddr *)&remote_addr, &sin_size) == -1) 
@@ -173,7 +167,6 @@ void* worker_loop(void* arg)
         continue;
       }
       inet_ntop(remote_addr.ss_family, get_in_addr((struct sockaddr*)&remote_addr), remote_ip, INET6_ADDRSTRLEN);
-          puts("This prints");
 
       // fd is disconnecting
       if (event & EPOLLRDHUP)
