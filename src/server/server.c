@@ -263,7 +263,8 @@ void close_connection(int fd, Worker* w)
   }
   inet_ntop(remote_addr.ss_family, get_in_addr((struct sockaddr*)&remote_addr), remote_ip, INET6_ADDRSTRLEN);
 
-  close(fd); // Bye!
+  shutdown(fd, SHUT_WR); // Bye!
+  close(fd);
 
   Coroutine* co = w->fd_table[fd];  // get coroutine
   w->fd_table[fd] = NULL;           // remove coroutine from waiting table

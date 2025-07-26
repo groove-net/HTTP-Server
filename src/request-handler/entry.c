@@ -7,7 +7,7 @@
 #define BUF_SIZE 8
 
 /*
- * This is an exmaple of a coroutine task. Here we can should use our non-blocking functions
+ * The entry point for every coroutine/connection. Here can user our async methods
  * for read/revc, write/send, sleep, etc. */
 void entry(void* arg, Worker* worker)
 {
@@ -24,12 +24,9 @@ void entry(void* arg, Worker* worker)
     // printf("[*] Received %d bytes from socket %d: %.*s", nbytes, fd, nbytes, buf);
     // if (buf[nbytes-1] != '\n') printf("\n");
 
-    if(parse(fd, buf, nbytes, worker) == -1)
-    {
-      send_async(fd, "Error: Bad Request\n", 19, 0, worker);
-      break;
-    }
+    if(parse(fd, buf, nbytes, worker) == -1) break;
   }
 
+  send_async(fd, "Error: Bad Request\n", 19, 0, worker);
   close_connection(fd, worker);
 }
