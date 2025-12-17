@@ -10,9 +10,6 @@
 
 #include "../include/server.h"
 
-#define PORT "3094"   // Port number
+#define PORT "3094" // Port number
 
-int main(void)
-{
-  server_init(PORT);
-}
+int main(void) { server_init(PORT); }

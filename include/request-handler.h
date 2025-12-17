@@ -1,4 +1,5 @@
 #pragma once
 
-#include "async.h"
-void entry(void*, Worker*);
+#include "coroutine.h"
+
+void entry(void *, Worker *);
