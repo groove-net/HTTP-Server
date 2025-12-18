@@ -14,8 +14,8 @@
  * program but close the connection.
  */
 void entry(void *arg, Worker *w) {
-  int client_fd = *(int *)arg;
-  free(arg);
+  // Cast the pointer back to an integer value
+  int client_fd = (int)(uintptr_t)arg;
 
   // Allocate and initialize the Request object for this connection
   Request req;

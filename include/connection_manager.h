@@ -12,6 +12,11 @@
 typedef enum WaitType { WAIT_READ, WAIT_WRITE } WaitType;
 typedef enum ReadyPolicy { RDY_LIFO, RDY_FIFO } ReadyPolicy;
 
+// Forward declarations
+struct Worker;
+typedef struct Worker Worker;
+
+// Define Coroutine
 typedef struct Coroutine {
   ucontext_t ctx;
   char stack[STACK_SIZE];
@@ -20,12 +25,14 @@ typedef struct Coroutine {
   struct Coroutine *next; // ready queue or fd list
   int finished;           // 1 if the coroutine has returned
 
-  /* pointer to trampoline args (opaque blob). Freed when coroutine is destroyed
-   */
-  void *trampoline_args;
+  // Direct storage for entry logic
+  void (*entry_fn)(void *, struct Worker *);
+  void *arg;
+  struct Worker *worker;
 } Coroutine;
 
-typedef struct Worker {
+// Define Worker
+struct Worker {
   int epfd;
   int notify_fds[2];               // pipe for main-thread wakeup
   Coroutine *ready_head;           // head of ready queue
@@ -39,11 +46,8 @@ typedef struct Worker {
   Coroutine *current; // coroutine currently running. if main_ctx is running,
                       // current = NULL
   pthread_t thread;
-
-  pthread_mutex_t ready_mutex;
-  pthread_mutex_t fd_mutex;
   // A coroutine typically cycles between ready_queue, fd_table, and current
-} Worker;
+};
 
 // High-level Pool Management
 void cm_init_thread_pool(int num_workers);

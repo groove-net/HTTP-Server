@@ -1,19 +1,9 @@
 #include "../../include/connection_manager.h"
-#include "../../include/liblog.h"
 #include "connection_manager.h"
 #include <assert.h>
 #include <stdint.h>
-#include <stdio.h>
 #include <string.h>
 #include <unistd.h>
-
-/* Internal trampoline args struct - passed through makecontext as a
- * pointer-sized arg */
-typedef struct TrampolineArgs {
-  void (*fn)(void *, Worker *);
-  void *arg;
-  Worker *worker;
-} TrampolineArgs;
 
 /*
  * Portable trampoline entry. makecontext will call this with one integer-sized
@@ -22,21 +12,19 @@ typedef struct TrampolineArgs {
  * This function runs the user fn(arg, worker), then marks the coroutine
  * finished and swaps back to the worker main context.
  */
-static void trampoline_start(uintptr_t tptr) {
-  TrampolineArgs *t = (TrampolineArgs *)(uintptr_t)tptr;
-  /* Run user function */
-  t->fn(t->arg, t->worker);
+static void trampoline_start(uintptr_t coptr) {
+  Coroutine *co = (Coroutine *)coptr;
 
-  /* Mark finished and return to main_ctx */
-  if (t->worker->current) {
-    t->worker->current->finished = 1;
-    /* swap back to main context; trampoline args will be freed by
-     * coroutine_destroy */
-    swapcontext(&t->worker->current->ctx, &t->worker->main_ctx);
-  } else {
-    /* extremely unlikely: no current coroutine set */
-    swapcontext(&t->worker->main_ctx, &t->worker->main_ctx);
-  }
+  /* 1. Run the user function */
+  co->entry_fn(co->arg, co->worker);
+
+  /* 2. Mark finished */
+  co->finished = 1;
+
+  /* 3. Return to main_ctx: Swap back to the worker's main event loop
+   * (schedule() function) */
+  /* We use co->ctx as the source and co->worker->main_ctx as the target */
+  swapcontext(&co->ctx, &co->worker->main_ctx);
 }
 
 /* ---------- ready queue operations (thread-safe) ---------- */
@@ -73,8 +61,6 @@ void add_to_ready(Worker *worker, Coroutine *co) {
 
   co->next = NULL;
 
-  pthread_mutex_lock(&worker->ready_mutex);
-
   if (!worker->ready_head) {
     /* queue empty */
     worker->ready_head = worker->ready_tail = co;
@@ -88,8 +74,6 @@ void add_to_ready(Worker *worker, Coroutine *co) {
     worker->ready_tail->next = co;
     worker->ready_tail = co;
   }
-
-  pthread_mutex_unlock(&worker->ready_mutex);
 }
 
 /* Pop head of ready queue. Caller must hold no locks; function locks
@@ -97,7 +81,7 @@ void add_to_ready(Worker *worker, Coroutine *co) {
  */
 static Coroutine *pop_ready_head(Worker *worker) {
   Coroutine *co = NULL;
-  pthread_mutex_lock(&worker->ready_mutex);
+
   co = worker->ready_head;
   if (co) {
     worker->ready_head = co->next;
@@ -105,7 +89,7 @@ static Coroutine *pop_ready_head(Worker *worker) {
       worker->ready_tail = NULL;
     co->next = NULL;
   }
-  pthread_mutex_unlock(&worker->ready_mutex);
+
   return co;
 }
 
@@ -116,12 +100,10 @@ void add_to_fd_table(Worker *worker, int fd, Coroutine *co) {
   if (!worker || fd < 0 || fd >= FD_SETSIZE || !co)
     return;
 
-  pthread_mutex_lock(&worker->fd_mutex);
   /* Since it's a 1:1 mapping, we simply assign the pointer.
    * If a previous coroutine was here, it should have been cleaned up by
    * close_connection. */
   worker->fd_table[fd] = co;
-  pthread_mutex_unlock(&worker->fd_mutex);
 }
 
 /* Clear the slot for a specific coroutine */
@@ -129,11 +111,9 @@ void remove_from_fd_table(Worker *worker, int fd, Coroutine *co) {
   if (!worker || fd < 0 || fd >= FD_SETSIZE || !co)
     return;
 
-  pthread_mutex_lock(&worker->fd_mutex);
   if (worker->fd_table[fd] == co) {
     worker->fd_table[fd] = NULL;
   }
-  pthread_mutex_unlock(&worker->fd_mutex);
 }
 
 /* Move all coroutines waiting on fd into the ready queue.
@@ -144,13 +124,11 @@ void wake_fd(Worker *worker, int fd) {
   if (!worker || fd < 0 || fd >= FD_SETSIZE)
     return;
 
-  pthread_mutex_lock(&worker->fd_mutex);
   Coroutine *co = worker->fd_table[fd];
 
   /* We do NOT set the table to NULL here.
    * The connection is still active; we only NULL it when the connection closes.
    */
-  pthread_mutex_unlock(&worker->fd_mutex);
 
   if (co != NULL) {
     co->fd = -1;
@@ -227,11 +205,11 @@ Coroutine *coroutine_create(void (*fn)(void *, Worker *), void *arg,
 
   memset(co, 0, sizeof(*co));
   co->fd = -1;
-  co->finished = 0;
-  co->trampoline_args = NULL;
+  co->entry_fn = fn;
+  co->arg = arg;
+  co->worker = worker;
 
   if (getcontext(&co->ctx) < 0) {
-    perror("coroutine_create: getcontext failed");
     free(co);
     return NULL;
   }
@@ -240,22 +218,10 @@ Coroutine *coroutine_create(void (*fn)(void *, Worker *), void *arg,
   co->ctx.uc_stack.ss_size = sizeof(co->stack);
   co->ctx.uc_link = &worker->main_ctx;
 
-  /* Prepare trampoline args */
-  TrampolineArgs *t = (TrampolineArgs *)malloc(sizeof(*t));
-  if (!t) {
-    perror("coroutine_create: trampoline alloc failed");
-    free(co);
-    return NULL;
-  }
-  t->fn = fn;
-  t->arg = arg;
-  t->worker = worker;
-  co->trampoline_args = t;
-
-  /* makecontext: pass pointer as a single uintptr_t argument (portable) */
+  /* Pass the co pointer directly to the trampoline start */
   /* Note: makecontext has no failure return; assume it succeeds on supported
    * systems */
-  makecontext(&co->ctx, (void (*)(void))trampoline_start, 1, (uintptr_t)t);
+  makecontext(&co->ctx, (void (*)(void))trampoline_start, 1, (uintptr_t)co);
 
   return co;
 }
@@ -267,35 +233,8 @@ Coroutine *coroutine_create(void (*fn)(void *, Worker *), void *arg,
 void coroutine_destroy(Worker *worker, Coroutine *co) {
   if (!worker || !co)
     return;
-
-  /* 1) Remove from ready queue if present */
-  pthread_mutex_lock(&worker->ready_mutex);
-  Coroutine *prev = NULL;
-  Coroutine *curr = worker->ready_head;
-  while (curr) {
-    if (curr == co) {
-      if (prev)
-        prev->next = curr->next;
-      else
-        worker->ready_head = curr->next;
-
-      if (worker->ready_tail == co)
-        worker->ready_tail = prev;
-      break;
-    }
-    prev = curr;
-    curr = curr->next;
-  }
-  pthread_mutex_unlock(&worker->ready_mutex);
-
-  /* 2) Remove from fd_table if it's waiting on something */
-  if (co->fd >= 0 && co->fd < FD_SETSIZE) {
-    remove_from_fd_table(worker, co->fd, co);
-  }
-
-  /* 3) Free associated memory */
-  if (co->trampoline_args) {
-    free(co->trampoline_args);
-  }
+  /* 1) Remove from fd_table if it's waiting on something */
+  remove_from_fd_table(worker, co->fd, co);
+  /* 2) Free associated memory */
   free(co);
 }

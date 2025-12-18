@@ -6,7 +6,6 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <sys/epoll.h>
-#include <unistd.h>
 
 #define DEBUG 1
 #define MAX_EVENTS 64 // Max number of events returned by epoll
@@ -53,17 +52,6 @@ void worker_init(Worker *w) {
     perror("epoll_create1");
     exit(EXIT_FAILURE);
   }
-
-  // Initialize thread mutexes
-  if (pthread_mutex_init(&w->ready_mutex, NULL) != 0) {
-    perror("ready_mutex init failed");
-    exit(EXIT_FAILURE);
-  }
-  if (pthread_mutex_init(&w->fd_mutex, NULL) != 0) {
-    perror("fd_mutex init failed");
-    exit(EXIT_FAILURE);
-  }
-
   // Create notify pipe
   if (pipe(w->notify_fds) == -1) {
     perror("pipe");
@@ -141,31 +129,66 @@ void *worker_loop(void *arg) {
       int fd = events[i].data.fd;        // get fd
       uint32_t event = events[i].events; // get event
 
-      // Notification pipe readable: new client fd(s) handed over by main thread
+      // Notification pipe readable: new accepted client fd(s) handed over by
+      // main listener thread
       if (fd == w->notify_fds[0]) {
-        // Drain all queued fds
+        /* Drain queued client fds in a batch:
+        Here, we read accepted client connections from the notification
+        pipe into an array rather than looping read one-by-one, which reduces
+        system call overhead if many connections arrive at once. By reading a
+        batch of file descriptors in one read() call, you reduce the transition
+        between "User Space" and "Kernel Space." When your server is under high
+        load (e.g., a burst of 32 connections), this prevents the CPU from doing
+        32 small system calls.*/
+        int fd_batch[32];
         while (1) {
-          int client_fd;
-          if (read(fd, &client_fd, sizeof(int)) <= 0)
-            break;
+          // Attempt to read multiple FDs at once
+          ssize_t bytes_read = read(fd, fd_batch, sizeof(fd_batch));
 
-          struct epoll_event ev = {.data.fd = client_fd,
-                                   .events = EPOLLIN | EPOLLOUT | EPOLLRDHUP |
-                                             EPOLLET};
-          if (epoll_ctl(w->epfd, EPOLL_CTL_ADD, client_fd, &ev) == -1) {
-            perror("epoll_ctl ADD failed");
-            printf("client_fd %d failed to be added to the event "
-                   "loop.\n",
-                   client_fd);
-            exit(EXIT_FAILURE);
+          if (bytes_read <= 0) {
+            if (bytes_read < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+              break; // Pipe is empty
+            }
+            break; // Error or EOF
+          }
+          // Calculate how many FDs we actually got
+          int num_fds = bytes_read / sizeof(int);
+
+          for (int j = 0; j < num_fds; j++) {
+            int client_fd = fd_batch[j];
+
+            // Register client fd in event loop. We register interest for the
+            // following events: READBLE (EPOLLIN). WRITETABLE (EPOOLOUT), and
+            // DISCONNECTING (EPOLLRDHUP).
+            // EPOLLET ensures that we dont perform a busy wait but actually
+            struct epoll_event ev = {.data.fd = client_fd,
+                                     .events = EPOLLIN | EPOLLOUT | EPOLLRDHUP |
+                                               EPOLLET};
+            if (epoll_ctl(w->epfd, EPOLL_CTL_ADD, client_fd, &ev) == -1) {
+              // Non-fatal error: close this connection and continue
+              log_error("epoll_ctl ADD failed. client_fd %d failed to be added "
+                        "to the event loop.",
+                        client_fd);
+              cm_close_connection(w, client_fd);
+              continue;
+            }
+
+            Coroutine *co =
+                coroutine_create(entry, (void *)(uintptr_t)client_fd, w);
+            if (co) {
+              add_to_ready(w, co);
+            } else {
+              // Non-fatal error: close this connection and continue
+              log_error("Coroutine creation failed for client_fd %d",
+                        client_fd);
+              cm_close_connection(w, client_fd);
+            }
           }
 
-          // Pass new fd to corotuine
-          int *pfd = malloc(sizeof(int));
-          *pfd = client_fd;
-
-          Coroutine *co = coroutine_create(entry, pfd, w);
-          add_to_ready(w, co);
+          // If we read fewer than the batch size, the pipe is likely drained
+          if (bytes_read < (ssize_t)sizeof(fd_batch)) {
+            break;
+          }
         }
         continue;
       }
