@@ -1,5 +1,6 @@
-#include "../../include/coroutine.h"
-
+#include "../../include/connection_manager.h"
+#include "../../include/liblog.h"
+#include "connection_manager.h"
 #include <assert.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -110,47 +111,27 @@ static Coroutine *pop_ready_head(Worker *worker) {
 
 /* ---------- fd table operations (thread-safe) ---------- */
 
-/* Add a coroutine to fd wait list (multiple waiters allowed) */
+/* Add a coroutine to fd wait slot (1 coroutine per socket) */
 void add_to_fd_table(Worker *worker, int fd, Coroutine *co) {
   if (!worker || fd < 0 || fd >= FD_SETSIZE || !co)
     return;
 
-  FdNode *node = (FdNode *)malloc(sizeof(FdNode));
-  if (!node) {
-    /* Allocation failure: abort yield path (best-effort) */
-    perror("add_to_fd_table: malloc failed");
-    return;
-  }
-  node->co = co;
-
   pthread_mutex_lock(&worker->fd_mutex);
-  node->next = worker->fd_table[fd];
-  worker->fd_table[fd] = node;
+  /* Since it's a 1:1 mapping, we simply assign the pointer.
+   * If a previous coroutine was here, it should have been cleaned up by
+   * close_connection. */
+  worker->fd_table[fd] = co;
   pthread_mutex_unlock(&worker->fd_mutex);
 }
 
-/* Remove all nodes from fd_table[fd] that refer to 'co' */
+/* Clear the slot for a specific coroutine */
 void remove_from_fd_table(Worker *worker, int fd, Coroutine *co) {
   if (!worker || fd < 0 || fd >= FD_SETSIZE || !co)
     return;
 
   pthread_mutex_lock(&worker->fd_mutex);
-  FdNode *prev = NULL;
-  FdNode *curr = worker->fd_table[fd];
-  while (curr) {
-    FdNode *next = curr->next;
-    if (curr->co == co) {
-      if (prev)
-        prev->next = next;
-      else
-        worker->fd_table[fd] = next;
-      free(curr);
-      /* continue scanning — remove all occurrences */
-      curr = next;
-      continue;
-    }
-    prev = curr;
-    curr = next;
+  if (worker->fd_table[fd] == co) {
+    worker->fd_table[fd] = NULL;
   }
   pthread_mutex_unlock(&worker->fd_mutex);
 }
@@ -158,27 +139,23 @@ void remove_from_fd_table(Worker *worker, int fd, Coroutine *co) {
 /* Move all coroutines waiting on fd into the ready queue.
  * This is intended to be called by the epoll loop when fd becomes ready.
  */
+/* Wake the single coroutine waiting on this fd */
 void wake_fd(Worker *worker, int fd) {
   if (!worker || fd < 0 || fd >= FD_SETSIZE)
     return;
 
-  /* Detach the entire list under lock, then push each to ready queue */
   pthread_mutex_lock(&worker->fd_mutex);
-  FdNode *head = worker->fd_table[fd];
-  worker->fd_table[fd] = NULL;
+  Coroutine *co = worker->fd_table[fd];
+
+  /* We do NOT set the table to NULL here.
+   * The connection is still active; we only NULL it when the connection closes.
+   */
   pthread_mutex_unlock(&worker->fd_mutex);
 
-  for (FdNode *n = head; n != NULL;) {
-    FdNode *next = n->next;
-    Coroutine *co = n->co;
-    /* clear coroutine's fd record (optional) */
+  if (co != NULL) {
     co->fd = -1;
     co->wait_type = 0;
-    /* add coroutine to ready queue (thread-safe) */
     add_to_ready(worker, co);
-    /* free node */
-    free(n);
-    n = next;
   }
 }
 
@@ -220,13 +197,17 @@ void schedule(Worker *worker) {
     worker->current = co;
     swapcontext(&worker->main_ctx, &co->ctx);
 
-    /* After swapcontext returns, coroutine either yielded or finished.
-     * If it finished, destroy it now.
+    /* swapcontext returns only when coroutine either yielded or finished.
+     * Immediately clear 'current' so indicate we are now back in the main
+     * context
      */
+    worker->current = NULL;
+
+    /* if the coroutine has finished, destroy it now. */
     if (co->finished) {
       coroutine_destroy(worker, co);
     }
-    /* otherwise it has been re-enqueued by yield/wake logic */
+    /* otherwise it has been re-enqueued by wake_fd logic */
   }
 }
 
@@ -287,16 +268,7 @@ void coroutine_destroy(Worker *worker, Coroutine *co) {
   if (!worker || !co)
     return;
 
-  /* If co is the currently running coroutine, don't free it here.
-   * schedule() will call coroutine_destroy only after the coroutine returns
-   * control.
-   */
-
   /* 1) Remove from ready queue if present */
-  /* Here, we remove only the first occurrence of co from the ready queue. In
-   * normal, correct usage a coroutine should only be enqueued once at a time —
-   * but bugs or races might cause duplicates. To be defensive, consider
-   * removing all occurrences */
   pthread_mutex_lock(&worker->ready_mutex);
   Coroutine *prev = NULL;
   Coroutine *curr = worker->ready_head;
@@ -306,6 +278,7 @@ void coroutine_destroy(Worker *worker, Coroutine *co) {
         prev->next = curr->next;
       else
         worker->ready_head = curr->next;
+
       if (worker->ready_tail == co)
         worker->ready_tail = prev;
       break;
@@ -315,17 +288,14 @@ void coroutine_destroy(Worker *worker, Coroutine *co) {
   }
   pthread_mutex_unlock(&worker->ready_mutex);
 
-  /* 2) Remove from all fd_table entries (ensure all occurrences removed) */
-  for (int fd = 0; fd < FD_SETSIZE; ++fd) {
-    remove_from_fd_table(worker, fd, co);
+  /* 2) Remove from fd_table if it's waiting on something */
+  if (co->fd >= 0 && co->fd < FD_SETSIZE) {
+    remove_from_fd_table(worker, co->fd, co);
   }
 
-  /* 3) Free trampoline args if any */
+  /* 3) Free associated memory */
   if (co->trampoline_args) {
     free(co->trampoline_args);
-    co->trampoline_args = NULL;
   }
-
-  /* 4) free coroutine itself */
   free(co);
 }
