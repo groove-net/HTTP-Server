@@ -25,7 +25,7 @@ void entry(void *arg, Worker *w) {
   char buf[BUF_SIZE];
   while (1) {
     // Get packets from client
-    int nbytes = recv_async(client_fd, buf, sizeof(buf), 0, w);
+    ssize_t nbytes = recv_async(client_fd, buf, sizeof(buf), 0, w);
 
     // 1. Check for disconnect or error
     if (nbytes <= 0) {
