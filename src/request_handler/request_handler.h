@@ -2,9 +2,9 @@
 #define REQUEST_HANDLER_PRIVATE_H
 
 // --- Constants ---
-#define INITIAL_BUF_SIZE 256
-#define MAX_HEADERS 16
-#define MAX_LINE_LEN 2048 // Max size for a single Request Line or Header
+#define INITIAL_BUF_SIZE 1024
+#define MAX_HEADERS 100
+#define MAX_LINE_LEN 8192 // Max size for a single Request Line or Header
 
 // --- State Machine Enums ---
 typedef enum {

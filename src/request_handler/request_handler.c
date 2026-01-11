@@ -1,8 +1,8 @@
 #include "../../include/connection_manager.h"
-#include "handler.c"
+#include "./middlewares/middleware_pipeline.c"
 #include "protocol.c"
 
-#define BUF_SIZE 256
+#define BUF_SIZE 4096
 
 /*
  * This is the entry point for every coroutine/connection (each connection maps
@@ -17,9 +17,7 @@ void entry(void *arg, Worker *w) {
   // Cast the pointer back to an integer value
   int client_fd = (int)(uintptr_t)arg;
 
-  // Allocate and initialize the Request object for this connection
   Request req;
-  request_init(&req);
 
   // Parsing and constructing on the Request object
   char buf[BUF_SIZE];
@@ -27,38 +25,53 @@ void entry(void *arg, Worker *w) {
     // Get packets from client
     ssize_t nbytes = recv_async(client_fd, buf, sizeof(buf), 0, w);
 
-    // 1. Check for disconnect or error
-    if (nbytes <= 0) {
-      /**
-       * If nbytes == 0, then the client has disconnected.
-       * If nbytes < 0, then an unrecoverable error (e.g., EBADF, ECONNRESET)
-       * has occured. Consider handling these errors.
-       * Either way, goto cleanup.
-       **/
-      goto cleanup;
-    }
+    while (1) {
+      char buf[BUF_SIZE]; // Read into a temporary buffer
 
-    // Parse client's packaets into Request object (only if nbytes > 0)
-    int parse_state = parse_http(&req, buf, nbytes);
+      // Get packets from client
+      ssize_t nbytes = recv_async(client_fd, buf, sizeof(buf), 0, 5000, w);
 
-    if (parse_state == -1) { // Bad Request, send error and close connection
-      send_async(client_fd, "Error: Bad Request\n", 19, 0, w);
-      goto cleanup;
-    }
-    if (parse_state == 0) { // Partially parsed, continue to recv next packets
-      continue;
-    }
-    if (parse_state == 1) { // Completely parsed, break recieve loop
-      break;
+      if (nbytes <= 0) {
+        /**
+         * Pemanent error
+         * If nbytes == 0, then the client has disconnected.
+         * If nbytes < 0, then an unrecoverable error (e.g., EBADF, ECONNRESET,
+         * ETIMEDOUT) has occured. Consider handling/logging these errors.
+         * Either way, must close connection.
+         **/
+        request_cleanup(&req);
+        keep_alive = 0;
+        break;
+      }
+
+      // Parse client's packets into Request object
+      int parse_state = parse_http(&req, buf, (int)nbytes);
+
+      if (parse_state == 0) // Partial
+        continue;
+
+      if (parse_state == 1) { // Success
+        // Check if the client wants to keep the connection open
+        // By default, HTTP/1.1 is keep-alive. We check for "close"
+        const char *conn_val = get_header(&req, "Connection");
+        if (conn_val != NULL && strcasecmp(conn_val, "close") == 0) {
+          keep_alive = 0;
+        }
+        // Start middleware pipeline
+        middleware_pipeline(&req, keep_alive, w, client_fd);
+        request_cleanup(&req);
+        break;
+      }
+
+      if (parse_state == -1) { // Request formet error, Close connection
+        send_error(client_fd, 400, NULL, 0, w);
+        request_cleanup(&req);
+        keep_alive = 0;
+        break;
+      }
     }
   }
 
-  // Request handling
-  handler(&req, w, client_fd);
-
-cleanup:
-  // Close the connection and cleanup the request struct
+  // Hardware close
   cm_close_connection(w, client_fd);
-  request_cleanup(&req);
-  return;
 }

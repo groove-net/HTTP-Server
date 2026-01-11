@@ -56,8 +56,9 @@ void cm_close_connection(Worker *w, int client_fd);
 
 // Async functions for coroutines
 size_t recv_async(int socket, void *buffer, size_t length, int flags,
-                  Worker *worker);
+                  int timeout_ms, Worker *worker);
 void send_async(int socket, const void *buffer, int length, int flags,
                 Worker *worker);
-
+void sendfile_async(int socket, const char *path, off_t file_size,
+                    Worker *worker);
 #endif

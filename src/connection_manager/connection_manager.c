@@ -7,7 +7,7 @@
 #include <fcntl.h>
 #include <sys/epoll.h>
 
-#define DEBUG 1
+#define DEBUG 0
 #define MAX_EVENTS 64 // Max number of events returned by epoll
 
 static Worker *worker_pool = NULL;
@@ -68,6 +68,7 @@ void worker_init(Worker *w) {
   ev.events = EPOLLIN;
   epoll_ctl(w->epfd, EPOLL_CTL_ADD, w->notify_fds[0], &ev);
 
+  w->policy = RDY_LIFO; // RDY_LIFO or RDY_FIFO
   w->ready_head = NULL; // head of ready queue
   w->ready_tail = NULL; // tail of ready queue (used for FIFO)
   w->current = NULL;
@@ -102,7 +103,7 @@ void cm_dispatch_connection(int client_fd) {
               ntohs(((struct sockaddr_in *)&remote_addr)->sin_port), client_fd);
   }
 
-  // Round-robin logic lives here now
+  // Round-robin
   int target = next_worker_idx % total_workers;
   next_worker_idx++;
 
