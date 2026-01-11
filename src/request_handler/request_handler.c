@@ -19,11 +19,10 @@ void entry(void *arg, Worker *w) {
 
   Request req;
 
-  // Parsing and constructing on the Request object
-  char buf[BUF_SIZE];
-  while (1) {
-    // Get packets from client
-    ssize_t nbytes = recv_async(client_fd, buf, sizeof(buf), 0, w);
+  int keep_alive = 1;
+  while (keep_alive) {
+    // Allocate and initialize the Request object once per full request
+    request_init(&req);
 
     while (1) {
       char buf[BUF_SIZE]; // Read into a temporary buffer
