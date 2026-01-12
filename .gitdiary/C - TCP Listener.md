@@ -359,21 +359,21 @@ int main(void) { server_init(PORT); }
 Now compiler and run the project using the Makefile:
 
 ```bash
-❯ ****make run
+❯ make run
 # ...
-15:11:02 INFO  src/server/server.c:80: [*] Server listening on port 3094
+15:11:02 INFO  src/server/server.c:80: [*] Server listening on port 8080
 ```
 
 In another terminal, start connections to the server using `netcat`:
 
 ```bash
-❯ ****netcat localhost 3094
+❯ netcat localhost 8080
 ```
 
 You should see logs from the server like this
 
 ```bash
-15:11:02 INFO  src/server/server.c:80: [*] Server listening on port 3094
+15:11:02 INFO  src/server/server.c:80: [*] Server listening on port 8080
 15:11:05 TRACE src/connection_manager/connection_manager.c:101: [+] New client connection (127.0.0.1:50848) on socket 4
 15:11:11 TRACE src/connection_manager/connection_manager.c:101: [+] New client connection (127.0.0.1:50850) on socket 5
 15:11:21 TRACE src/connection_manager/connection_manager.c:101: [+] New client connection (127.0.0.1:50508) on socket 6
