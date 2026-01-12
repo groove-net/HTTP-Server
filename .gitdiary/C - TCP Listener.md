@@ -11,8 +11,27 @@ Today, I tackled the most critical part of any server: **The TCP Listener.**
 While the Internet Protocol (IP) handles the routing of individual packets (datagrams) from host to host, it is inherently "best-effort" and unreliable. Packets can be lost, delayed, duplicated, or arrive out of order. **TCP (Transmission Control Protocol)** sits atop IP to provide a connection-oriented, reliable **byte-stream service**.
 
 1. **The Byte-Stream Abstraction**
+    
+    The most critical distinction of TCP is that it does not preserve record boundaries. Unlike UDP, where one `send()` equals one packet, TCP views data as an unstructured, continuous sequence of 8-bit bytes.
+    
+    The application on one end writes a stream of bytes into a TCP socket; the TCP implementation buffers this data, segments it into **Maximum Segment Size (MSS)** chunks, encapsulates them in IP datagrams, and transmits them. The receiving TCP peer then reassembles these bytes into its own buffer, allowing the receiving application to read them exactly as they were sent.
+    
 2. **Reliability through Positive Acknowledgment with Retransmission (PAR)**
+    
+    TCP ensures that every byte is received by using a sequence-numbering system. Every byte in a TCP connection has its own unique **Sequence Number**.
+    
+    - **Cumulative Acknowledgments:** When the receiver sends an **ACK**, the acknowledgment number indicates the sequence number of the *next* byte the receiver expects to receive.8 This implicitly confirms that every byte *prior* to that number has been successfully processed.
+    - **Retransmission Timers:** If the sender does not receive an ACK for a transmitted segment within a calculated **Retransmission Time-Out (RTO)**, it assumes the packet was lost and resends the data.
+    - **Flow and Congestion Control:** TCP uses a "sliding window" mechanism. The receiver advertises a **Window Size**, telling the sender how much data it can buffer. This prevents a fast sender from overwhelming a slow receiver.
 3. **The Three-Way Handshake**
+    
+    Before any HTTP data can be exchanged, TCP must establish a logical connection. This synchronization of sequence numbers is known as the **Three-Way Handshake**:
+    
+    1. **SYN:** The client picks an Initial Sequence Number (`ISN_c`) and sends a segment with the `SYN` flag set.
+    2. **SYN-ACK:** The server increments the client's `ISN_c` to create an ACK number, picks its own `ISN_s`, and sends a segment with both `SYN` and `ACK` flags.
+    3. **ACK:** The client acknowledges the server’s `ISN_s`. 
+    
+    Only after this "handshake" is complete is the connection considered `ESTABLISHED`, allowing the first byte of your HTTP request to be sent.
 
 ## Create the Listener socket
 
@@ -314,7 +333,26 @@ By passing the `client_fd` to `cm_dispatch_connection`, I’m keeping the networ
 
 ---
 
-## The main function
+## The `main` function
+
+In `main` use the `server_init` function to start the server on a given port:
+
+```c
+ ============================================================================
+ Name        : HTTP Server
+ Author      : Fullname
+ Version     : 1.0
+ Description : An event-driven HTTP Server written in pure C.
+ License     : MIT
+ ============================================================================
+*/
+
+#include "../include/server.h"
+
+#define PORT "8080" // Port number
+
+int main(void) { server_init(PORT); }
+```
 
 ## The Listener in Action
 
