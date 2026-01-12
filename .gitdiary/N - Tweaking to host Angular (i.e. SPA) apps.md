@@ -80,7 +80,7 @@ void handle_static_file_middleware(Request *req, int keep_alive, Worker *w,
     }
   }
 	
-	// ADD THIS:
+  // ADD THIS:
   // SPA FALLBACK: If file not found, check if it's a "deep link"
   // We only fallback for GET requests that don't look like files (no dot in the
   // last segment)
