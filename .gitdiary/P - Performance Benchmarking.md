@@ -88,7 +88,13 @@ Building the server is only half the battle. To truly understand its limits, I r
 
 Summary of Optimizations:
 
+| **Optimization** | **Target** | **Impact** |
 | --- | --- | --- |
+| **`ulimit -n`** | OS Limits | Prevents connection drops under load. |
+| **`SO_REUSEPORT`** | Parallelism | Scales listener throughput across all CPU cores. |
+| **Memory Arenas** | Latency | Eliminates `malloc` lock contention in workers. |
+| **`sendfile`** | I/O | Achieves zero-copy data transfer. |
+| **Pre-Gzip** | Bandwidth | Reduces transfer time for large JS bundles. |
 
 ### Conclusion
 
