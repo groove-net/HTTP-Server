@@ -335,7 +335,7 @@ By passing the `client_fd` to `cm_dispatch_connection`, I’m keeping the networ
 
 ## The `main` function
 
-In `main` use the `server_init` function to start the server on a given port:
+In `main`, use the `server_init` function to start the server on a given port:
 
 ```c
  ============================================================================
